@@ -1,0 +1,49 @@
+{
+  "raw_year_gap_only": {
+    "features_used": [
+      "cosine_similarity",
+      "shared_culture",
+      "shared_department",
+      "year_gap"
+    ],
+    "roc_auc": 0.9687,
+    "feature_importance": {
+      "cosine_similarity": 0.3913,
+      "year_gap": 0.0084,
+      "shared_department": 0.0051,
+      "shared_culture": 0.004
+    }
+  },
+  "fuzzy_temporal_only": {
+    "features_used": [
+      "cosine_similarity",
+      "shared_culture",
+      "shared_department",
+      "fuzzy_temporal_membership"
+    ],
+    "roc_auc": 0.9684,
+    "feature_importance": {
+      "cosine_similarity": 0.4058,
+      "fuzzy_temporal_membership": 0.0044,
+      "shared_department": 0.0042,
+      "shared_culture": 0.0037
+    }
+  },
+  "both_temporal_features": {
+    "features_used": [
+      "cosine_similarity",
+      "shared_culture",
+      "shared_department",
+      "year_gap",
+      "fuzzy_temporal_membership"
+    ],
+    "roc_auc": 0.9687,
+    "feature_importance": {
+      "cosine_similarity": 0.3921,
+      "year_gap": 0.0088,
+      "shared_department": 0.0049,
+      "shared_culture": 0.0046,
+      "fuzzy_temporal_membership": 0.0022
+    }
+  }
+}

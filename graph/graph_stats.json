@@ -1,0 +1,17 @@
+{
+  "total_rows_in_input": 50000,
+  "object_nodes": 50000,
+  "hub_nodes": 17513,
+  "hub_nodes_by_type": {
+    "has_artist": 13780,
+    "has_department": 17,
+    "has_culture": 1957,
+    "has_classification": 723,
+    "has_tag": 1036
+  },
+  "total_edges": 271140,
+  "isolated_objects_no_edges": 0,
+  "isolated_objects_pct": 0.0,
+  "candidate_positive_pairs_sampled": 32154,
+  "unique_object_pairs_after_dedup": 32054
+}

@@ -1,0 +1,57 @@
+/* ============================================================
+   DESIGN TOKENS
+   Subject: a curator's evidence ledger for machine-suggested
+   relationships between museum objects. Grounded in real archival
+   materials — accession tags, catalog cards, ledger lines — rather
+   than a generic dashboard look.
+   ============================================================ */
+:root {
+  /* Color */
+  --ink: #1b1d1f;          /* page background — archive-room dark, not pure black */
+  --ink-soft: #242628;      /* raised panels */
+  --parchment: #e9e0c8;     /* specimen tag surface */
+  --parchment-edge: #d6c9a3;/* tag border / shadow */
+  --bronze: #b08552;        /* primary accent — museum plaque bronze */
+  --bronze-strong: #8f6a3e;
+  --verdigris: #6b8b7a;     /* secondary accent — oxidized copper */
+  --ledger-line: #38393c;   /* hairline dividers on dark bg */
+  --text-primary: #ece7da;  /* body text on dark */
+  --text-muted: #928d80;
+  --text-on-parchment: #2a271f;
+  --text-on-parchment-muted: #6b6452;
+
+  /* Type */
+  --font-display: "Fraunces", serif;
+  --font-body: "Inter", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--ink);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+::selection {
+  background: var(--bronze);
+  color: var(--ink);
+}
+
+/* Visible keyboard focus, kept from the design-system quality floor */
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--verdigris);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}

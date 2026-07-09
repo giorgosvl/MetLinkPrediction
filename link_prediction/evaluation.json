@@ -1,0 +1,11 @@
+{
+  "roc_auc": 0.9687,
+  "n_train": 51286,
+  "n_test": 12822,
+  "feature_importance": {
+    "cosine_similarity": 0.3913,
+    "year_gap": 0.0084,
+    "shared_department": 0.0051,
+    "shared_culture": 0.004
+  }
+}
