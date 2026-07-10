@@ -4,14 +4,34 @@
       "cosine_similarity",
       "shared_culture",
       "shared_department",
+      "common_neighbors",
+      "jaccard",
+      "adamic_adar",
+      "preferential_attachment",
+      "node2vec_similarity",
       "year_gap"
     ],
-    "roc_auc": 0.9687,
+    "roc_auc": 0.9676,
+    "confusion_matrix": [
+      [
+        5953,
+        458
+      ],
+      [
+        715,
+        5696
+      ]
+    ],
     "feature_importance": {
-      "cosine_similarity": 0.3913,
-      "year_gap": 0.0084,
-      "shared_department": 0.0051,
-      "shared_culture": 0.004
+      "cosine_similarity": 0.3395,
+      "adamic_adar": 0.0178,
+      "year_gap": 0.0035,
+      "preferential_attachment": 0.0034,
+      "node2vec_similarity": 0.0032,
+      "shared_department": 0.0001,
+      "jaccard": -0.0,
+      "shared_culture": -0.0,
+      "common_neighbors": -0.0001
     }
   },
   "fuzzy_temporal_only": {
@@ -19,14 +39,34 @@
       "cosine_similarity",
       "shared_culture",
       "shared_department",
+      "common_neighbors",
+      "jaccard",
+      "adamic_adar",
+      "preferential_attachment",
+      "node2vec_similarity",
       "fuzzy_temporal_membership"
     ],
-    "roc_auc": 0.9684,
+    "roc_auc": 0.9674,
+    "confusion_matrix": [
+      [
+        5941,
+        470
+      ],
+      [
+        711,
+        5700
+      ]
+    ],
     "feature_importance": {
-      "cosine_similarity": 0.4058,
-      "fuzzy_temporal_membership": 0.0044,
-      "shared_department": 0.0042,
-      "shared_culture": 0.0037
+      "cosine_similarity": 0.3479,
+      "adamic_adar": 0.0182,
+      "preferential_attachment": 0.0038,
+      "node2vec_similarity": 0.0037,
+      "fuzzy_temporal_membership": 0.0015,
+      "common_neighbors": 0.0002,
+      "jaccard": 0.0001,
+      "shared_department": 0.0001,
+      "shared_culture": -0.0
     }
   },
   "both_temporal_features": {
@@ -34,16 +74,36 @@
       "cosine_similarity",
       "shared_culture",
       "shared_department",
+      "common_neighbors",
+      "jaccard",
+      "adamic_adar",
+      "preferential_attachment",
+      "node2vec_similarity",
       "year_gap",
       "fuzzy_temporal_membership"
     ],
-    "roc_auc": 0.9687,
+    "roc_auc": 0.9676,
+    "confusion_matrix": [
+      [
+        5957,
+        454
+      ],
+      [
+        715,
+        5696
+      ]
+    ],
     "feature_importance": {
-      "cosine_similarity": 0.3921,
-      "year_gap": 0.0088,
-      "shared_department": 0.0049,
-      "shared_culture": 0.0046,
-      "fuzzy_temporal_membership": 0.0022
+      "cosine_similarity": 0.3394,
+      "adamic_adar": 0.0186,
+      "preferential_attachment": 0.0035,
+      "node2vec_similarity": 0.0033,
+      "year_gap": 0.003,
+      "fuzzy_temporal_membership": 0.0001,
+      "shared_culture": 0.0,
+      "shared_department": 0.0,
+      "common_neighbors": 0.0,
+      "jaccard": 0.0
     }
   }
 }

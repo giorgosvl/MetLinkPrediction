@@ -26,6 +26,7 @@ def load_data():
         embeddings_path="embeddings/embeddings.npy",
         ids_path="embeddings/embedding_object_ids.json",
         model_path="fuzzy/link_predictor_fuzzy.joblib",
+        graph_path="graph/graph.graphml",
     )
 
 

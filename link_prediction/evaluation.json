@@ -1,11 +1,26 @@
 {
-  "roc_auc": 0.9687,
+  "roc_auc": 0.9676,
   "n_train": 51286,
   "n_test": 12822,
+  "confusion_matrix": [
+    [
+      5957,
+      454
+    ],
+    [
+      714,
+      5697
+    ]
+  ],
   "feature_importance": {
-    "cosine_similarity": 0.3913,
-    "year_gap": 0.0084,
-    "shared_department": 0.0051,
-    "shared_culture": 0.004
+    "cosine_similarity": 0.3388,
+    "adamic_adar": 0.0179,
+    "year_gap": 0.0041,
+    "node2vec_similarity": 0.0037,
+    "preferential_attachment": 0.0035,
+    "shared_department": 0.0001,
+    "shared_culture": 0.0,
+    "common_neighbors": 0.0,
+    "jaccard": 0.0
   }
 }

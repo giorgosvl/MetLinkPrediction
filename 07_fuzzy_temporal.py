@@ -4,20 +4,7 @@ Fuzzy temporal matching stage (Month 2, Week 6 of the timeline).
 Replaces the raw `year_gap` feature from Week 5 with a proper fuzzy
 membership score that reflects historical dating uncertainty, and then
 re-trains the Week 5 classifier to measure whether it actually helps --
-producing the ablation evidence a thesis reviewer will ask for (Week 5's
-low year_gap importance of 0.0084 suggests the raw feature was too noisy
-to be useful; this tests whether a better-designed temporal feature does
-better).
-
-WHY A RAW YEAR DIFFERENCE IS THE WRONG REPRESENTATION:
-  `Object Begin Date` / `Object End Date` are themselves a RANGE
-  representing dating uncertainty (e.g. "circa 1447-1475" -> begin=1447,
-  end=1475). Reducing that to a single midpoint and subtracting midpoints
-  (what Week 5 did) throws away exactly the uncertainty information that
-  the proposal's fuzzy-logic module is supposed to model. Two objects
-  dated "1447-1475" and "1460-1480" clearly overlap and should be treated
-  as "same era" with high confidence -- a midpoint-difference feature
-  can't represent that.
+producing the ablation evidence a thesis reviewer will ask for.
 
 FUZZY MEMBERSHIP FUNCTION:
   For two date ranges [a_begin, a_end] and [b_begin, b_end]:
@@ -27,8 +14,6 @@ FUZZY MEMBERSHIP FUNCTION:
   If gap > 0, membership decays smoothly with the size of the gap using a
   Gaussian-style curve, controlled by `--tolerance` (in years, default 50):
     membership = exp(-(gap^2) / (2 * tolerance^2))
-  This IS the fuzzy logic asked for in the proposal: instead of a hard
-  cutoff ("same period: yes/no"), it's a smooth degree-of-truth in [0, 1].
 
 Usage:
     python 07_fuzzy_temporal.py \
@@ -45,13 +30,39 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingClassifier
+from xgboost import XGBClassifier
 from sklearn.inspection import permutation_importance
-from sklearn.metrics import classification_report, roc_auc_score
+from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
 from sklearn.model_selection import train_test_split
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
+
+# Same domain knowledge as 06_link_prediction.py's MONOTONIC_DIRECTIONS
+# (kept in sync manually rather than imported, since "06_link_prediction"
+# is not a valid Python module name to import from). None of these
+# features should ever have a negative marginal effect on link
+# probability with everything else held fixed, and year_gap should never
+# have a positive one. This is what removes the non-monotonic dips seen
+# in the calibration sweep (e.g. probability dropping as cosine_similarity
+# rises from 0.60 to 0.65).
+MONOTONIC_DIRECTIONS: dict[str, int] = {
+    "cosine_similarity": 1,
+    "shared_culture": 1,
+    "shared_department": 1,
+    "common_neighbors": 1,
+    "jaccard": 1,
+    "adamic_adar": 1,
+    "preferential_attachment": 0,
+    "node2vec_similarity": 1,
+    "fuzzy_temporal_membership": 1,
+    "year_gap": -1,
+}
+
+
+def monotone_constraints_for(feature_cols: list[str]) -> str:
+    directions = [str(MONOTONIC_DIRECTIONS.get(c, 0)) for c in feature_cols]
+    return "(" + ",".join(directions) + ")"
 
 
 def fuzzy_temporal_membership(
@@ -74,12 +85,26 @@ def train_and_evaluate(data: pd.DataFrame, feature_cols: list[str], seed: int = 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=seed, stratify=y
     )
-    model = HistGradientBoostingClassifier(random_state=seed)
+    
+    # XGBClassifier replacement
+    model = XGBClassifier(
+        learning_rate=0.05,
+        max_depth=5,
+        n_estimators=500,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=seed,
+        eval_metric="logloss",
+        n_jobs=-1,
+        tree_method="hist",
+        monotone_constraints=monotone_constraints_for(feature_cols),
+    )
     model.fit(X_train, y_train)
 
     y_pred = model.predict(X_test)
     y_proba = model.predict_proba(X_test)[:, 1]
     auc = roc_auc_score(y_test, y_proba)
+    cm = confusion_matrix(y_test, y_pred)
 
     importance = permutation_importance(model, X_test, y_test, n_repeats=10, random_state=seed)
     importance_summary = {
@@ -90,6 +115,7 @@ def train_and_evaluate(data: pd.DataFrame, feature_cols: list[str], seed: int = 
     return {
         "features_used": feature_cols,
         "roc_auc": round(auc, 4),
+        "confusion_matrix": cm.tolist(),
         "feature_importance": importance_summary,
         "classification_report": classification_report(y_test, y_pred, target_names=["not_linked", "linked"]),
     }, model
@@ -120,7 +146,10 @@ def run(dataset_path: str, metadata_path: str, out_dir: str, tolerance: float) -
     logger.info("Fuzzy temporal score computed for %d/%d pairs (rest have missing dates)", known, len(data))
 
     # --- Ablation: year_gap alone vs fuzzy_temporal_membership alone vs both ---
-    base_features = ["cosine_similarity", "shared_culture", "shared_department"]
+    base_features = [
+        "cosine_similarity", "shared_culture", "shared_department",
+        "common_neighbors", "jaccard", "adamic_adar", "preferential_attachment", "node2vec_similarity"
+    ]
     variants = {
         "raw_year_gap_only": base_features + ["year_gap"],
         "fuzzy_temporal_only": base_features + ["fuzzy_temporal_membership"],
@@ -130,6 +159,7 @@ def run(dataset_path: str, metadata_path: str, out_dir: str, tolerance: float) -
     results = {}
     for name, feature_cols in variants.items():
         logger.info("--- Training variant: %s ---", name)
+        logger.info("Training XGBoost...")
         metrics, model = train_and_evaluate(data, feature_cols)
         results[name] = metrics
         logger.info("%s -> ROC-AUC=%.4f, importances=%s", name, metrics["roc_auc"], metrics["feature_importance"])
@@ -143,6 +173,7 @@ def run(dataset_path: str, metadata_path: str, out_dir: str, tolerance: float) -
         indent=2,
     ))
     logger.info("Saved dataset and ablation results to %s", out)
+    logger.info("Evaluation completed.")
 
     logger.info("\n=== SUMMARY: does fuzzy temporal matching help? ===")
     for name, metrics in results.items():

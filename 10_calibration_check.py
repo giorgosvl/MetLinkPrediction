@@ -35,7 +35,19 @@ def synthetic_sweep(model) -> None:
             "shared_culture": 1,
             "shared_department": 1,
             "fuzzy_temporal_membership": 1.0,
+            "common_neighbors": 1.0,
+            "jaccard": 0.5,
+            "adamic_adar": 1.0,
+            "preferential_attachment": 1.0,
+            "node2vec_similarity": 0.5,
         }])
+        # Reorder to match trained feature order
+        feature_cols = [
+            "cosine_similarity", "shared_culture", "shared_department",
+            "common_neighbors", "jaccard", "adamic_adar", "preferential_attachment", "node2vec_similarity",
+            "fuzzy_temporal_membership"
+        ]
+        row = row[feature_cols]
         prob = model.predict_proba(row)[0, 1]
         bar = "#" * int(prob * 40)
         print(f"cosine={cos:.2f}  prob={prob:.4f}  {bar}")
@@ -44,7 +56,11 @@ def synthetic_sweep(model) -> None:
 def real_distribution(model, dataset_path: str) -> None:
     print(f"\n=== Real probability distribution on {dataset_path} ===")
     data = pd.read_csv(dataset_path)
-    feature_cols = ["cosine_similarity", "shared_culture", "shared_department", "fuzzy_temporal_membership"]
+    feature_cols = [
+        "cosine_similarity", "shared_culture", "shared_department",
+        "common_neighbors", "jaccard", "adamic_adar", "preferential_attachment", "node2vec_similarity",
+        "fuzzy_temporal_membership"
+    ]
     probs = model.predict_proba(data[feature_cols])[:, 1]
 
     print(f"n = {len(probs)}")

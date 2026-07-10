@@ -6,6 +6,8 @@ node_modules/
 .vite/
 dist/
 build/
+cache/
+node2vec_embeddings*.pkl
 
 .env
 .env.*

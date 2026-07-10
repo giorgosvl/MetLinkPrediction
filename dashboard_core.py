@@ -6,22 +6,13 @@ is unit-testable.
 
 Pipeline for one query object:
   1. Find its nearest neighbors by embedding cosine similarity (FAISS if
-     the index file exists, else a numpy brute-force fallback -- at 50K
-     objects x 768 dims, brute-force is a few milliseconds anyway, so
-     FAISS is a "nice to have" here, not a requirement).
+     the index file exists, else a numpy brute-force fallback).
   2. Score each neighbor with the Week 5/6 trained classifier (same
      feature set: cosine_similarity, shared_culture, shared_department,
-     temporal feature).
+     fuzzy_temporal_membership, common_neighbors, jaccard, adamic_adar,
+     preferential_attachment, node2vec_similarity).
   3. For the top-K by predicted probability, ask the local LLM to write a
-     one-paragraph, plain-language rationale -- THIS is the step where an
-     LLM genuinely adds value in this pipeline (unlike the Week 2
-     extraction step): turning a probability + a handful of numeric
-     features into a readable explanation for a curator is exactly the
-     kind of task an LLM is good at and a lookup table is not.
-
-If Ollama is unreachable, `explain_link` falls back to a deterministic,
-template-based sentence built directly from the features -- so the
-dashboard still works (with a less polished explanation) even offline.
+     one-paragraph, plain-language rationale.
 """
 
 from __future__ import annotations
@@ -34,6 +25,15 @@ import joblib
 import numpy as np
 import pandas as pd
 import requests
+
+import sys
+from pathlib import Path
+
+# Add root folder to sys.path to enable imports when run from webapp_mus folder
+sys.path.append(str(Path(__file__).resolve().parent))
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+from graph_features import load_graph, GraphTopologyIndex, Node2VecEmbeddings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -60,7 +60,14 @@ def normalize_value(value):
 class DashboardData:
     """Loads and holds everything the dashboard needs to answer a query."""
 
-    def __init__(self, metadata_path: str, embeddings_path: str, ids_path: str, model_path: str):
+    def __init__(
+        self,
+        metadata_path: str,
+        embeddings_path: str,
+        ids_path: str,
+        model_path: str,
+        graph_path: str = "graph/graph.graphml",
+    ):
         self.df = pd.read_csv(metadata_path, low_memory=False).set_index("Object ID")
         vectors = np.load(embeddings_path)
         ids = json.loads(Path(ids_path).read_text())
@@ -74,6 +81,16 @@ class DashboardData:
         logger.info(
             "Loaded dashboard data: %d metadata rows, %d embeddings", len(self.df), len(ids)
         )
+
+        logger.info("Loading graph...")
+        self.graph = load_graph(graph_path)
+        
+        logger.info("Computing graph topology features...")
+        self.topology_index = GraphTopologyIndex(self.graph)
+        
+        # Determine the cache folder dynamically based on where graph_path is located
+        cache_dir = Path(graph_path).parent.parent / "cache"
+        self.node2vec = Node2VecEmbeddings(self.graph, cache_path=cache_dir / "node2vec_embeddings.pkl")
 
     def object_info(self, object_id: int) -> dict:
         row = self.df.loc[object_id]
@@ -125,15 +142,30 @@ class DashboardData:
             gap = max(begin_a, begin_b) - min(end_a, end_b)
             fuzzy_temporal = 1.0 if gap <= 0 else float(np.exp(-(gap ** 2) / (2 * tolerance ** 2)))
 
+        # Graph topology features
+        graph_feats = self.topology_index.compute_features(object_id_a, object_id_b)
+
+        # Node2Vec similarity feature
+        n2v_sim = self.node2vec.similarity(object_id_a, object_id_b)
+
         return {
             "cosine_similarity": cosine,
             "shared_culture": shared_culture,
             "shared_department": shared_department,
             "fuzzy_temporal_membership": fuzzy_temporal,
+            "common_neighbors": graph_feats["common_neighbors"],
+            "jaccard": graph_feats["jaccard"],
+            "adamic_adar": graph_feats["adamic_adar"],
+            "preferential_attachment": graph_feats["preferential_attachment"],
+            "node2vec_similarity": n2v_sim,
         }
 
     def predict_link_probability(self, features: dict) -> float:
-        feature_cols = ["cosine_similarity", "shared_culture", "shared_department", "fuzzy_temporal_membership"]
+        feature_cols = [
+            "cosine_similarity", "shared_culture", "shared_department",
+            "common_neighbors", "jaccard", "adamic_adar", "preferential_attachment", "node2vec_similarity",
+            "fuzzy_temporal_membership"
+        ]
         X = pd.DataFrame([{c: features[c] for c in feature_cols}])
         return float(self.model.predict_proba(X)[0, 1])
 
@@ -187,9 +219,9 @@ def _template_explanation(info_a: dict, info_b: dict, features: dict, probabilit
     )
 
 
-def demo(metadata_path: str, embeddings_path: str, ids_path: str, model_path: str, object_id: int, top_k: int) -> None:
+def demo(metadata_path: str, embeddings_path: str, ids_path: str, model_path: str, graph_path: str, object_id: int, top_k: int) -> None:
     """CLI entry point for testing without Streamlit."""
-    data = DashboardData(metadata_path, embeddings_path, ids_path, model_path)
+    data = DashboardData(metadata_path, embeddings_path, ids_path, model_path, graph_path)
     query_info = data.object_info(object_id)
     print(f"\nQuery object: {query_info}\n")
 
@@ -212,8 +244,9 @@ if __name__ == "__main__":
     parser.add_argument("--metadata", default="met_with_extracted_info.csv")
     parser.add_argument("--embeddings", default="embeddings/embeddings.npy")
     parser.add_argument("--embedding-ids", default="embeddings/embedding_object_ids.json")
-    parser.add_argument("--model", default="link_prediction/link_predictor_fuzzy.joblib")
+    parser.add_argument("--model", default="fuzzy/link_predictor_fuzzy.joblib")
+    parser.add_argument("--graph", default="graph/graph.graphml")
     parser.add_argument("--object-id", type=int, required=True)
     parser.add_argument("--top-k", type=int, default=5)
     args = parser.parse_args()
-    demo(args.metadata, args.embeddings, args.embedding_ids, args.model, args.object_id, args.top_k)
+    demo(args.metadata, args.embeddings, args.embedding_ids, args.model, args.graph, args.object_id, args.top_k)
