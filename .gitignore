@@ -8,6 +8,9 @@ dist/
 build/
 cache/
 node2vec_embeddings*.pkl
+dashboard_cache.db
+*.sqlite
+*.sqlite3
 
 .env
 .env.*

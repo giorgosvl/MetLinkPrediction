@@ -1,11 +1,9 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import "./App.css";
 
+// ⚡ Διόρθωση θύρας ώστε να χτυπάει σωστά το FastAPI backend σου
 const API_BASE = "http://localhost:4345/api";
 
-// ----------------------------------------------------------------
-// Εμπλουτισμένα Mock Data προεπισκόπησης για να εμφανίζουν όλες τις πληροφορίες
-// ----------------------------------------------------------------
 const PREVIEW_CONNECTION_CARDS = [
   {
     object_id: "1975.1.2",
@@ -49,9 +47,75 @@ const PREVIEW_CONNECTION_CARDS = [
   },
 ];
 
-// ============================================================================
-// REUSABLE 3D VITRINE WRAPPER COMPONENT
-// ============================================================================
+function ExplainModal({ state, onClose }) {
+  if (!state || !state.open) return null;
+
+  const { loading, error, sourceObject, targetObject, explanation, metrics } = state;
+
+  const handleCopy = () => {
+    if (explanation) navigator.clipboard.writeText(explanation);
+  };
+
+  return (
+    <div className="explain-modal-overlay" onClick={onClose}>
+      <div className="explain-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="explain-modal-header">
+          <div className="explain-modal-pair">
+            <span className="explain-modal-object">{sourceObject?.title || "Object A"}</span>
+            <span className="explain-modal-arrow">↓</span>
+            <span className="explain-modal-object">{targetObject?.title || "Object B"}</span>
+          </div>
+          <button className="explain-modal-close" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+
+        <div className="explain-modal-body">
+          {loading && (
+            <div className="explain-modal-loading">
+              <div className="explain-spinner" />
+              <p>Asking the local model to explain this relationship…</p>
+            </div>
+          )}
+
+          {!loading && error && (
+            <p className="explain-modal-error">{error}</p>
+          )}
+
+          {!loading && !error && explanation && (
+            <>
+              <div className="explain-modal-text">{explanation.replace(/\*\*/g, '')}</div>
+
+              {metrics && Object.keys(metrics).length > 0 && (
+                <details className="explain-metrics">
+                  <summary>Similarity Metrics</summary>
+                  <ul className="explain-metrics-list">
+                    {Object.entries(metrics).map(([key, value]) => (
+                      <li key={key}>
+                        <span className="explain-metrics-key">{key}</span>
+                        <span className="explain-metrics-value">
+                          {typeof value === "number" ? value.toFixed(3) : String(value)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </>
+          )}
+        </div>
+
+        <div className="explain-modal-footer">
+          <button className="btn-copy" onClick={handleCopy} disabled={!explanation}>
+            Copy
+          </button>
+          <button className="btn-outline-modal" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function VitrineShowcase({ title, children, className = "" }) {
   return (
     <div className={`vitrine-wrapper ${className}`}>
@@ -63,9 +127,6 @@ function VitrineShowcase({ title, children, className = "" }) {
   );
 }
 
-// ============================================================================
-// SUB-COMPONENTS
-// ============================================================================
 function Header() {
   return (
     <header className="hero-header">
@@ -82,8 +143,25 @@ function Header() {
   );
 }
 
-function ThumbFallback({ title }) {
+// 🖼️ Αναβαθμισμένο component: Δείχνει την εικόνα του αντικειμένου και αν δεν υπάρχει βάζει το γράμμα
+function ObjectThumbnail({ imageUrl, title }) {
+  const [error, setError] = useState(false);
   const letter = (title || "?").trim().charAt(0).toUpperCase();
+
+  if (imageUrl && !error) {
+    return (
+      <div className="card-thumb-wrapper">
+        <img 
+          src={imageUrl} 
+          alt={title} 
+          className="conn-thumb" 
+          style={{ width: "100%", height: "100%", objectFit: "cover" }}
+          onError={() => setError(true)}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="card-thumb-wrapper card-thumb-fallback">
       <span>{letter}</span>
@@ -92,14 +170,34 @@ function ThumbFallback({ title }) {
 }
 
 function SearchCard({ item, onClick }) {
+  // Μια απλή συνάρτηση για να δίνουμε ένα όμορφο emoji ανάλογα με το Department ή το Object Name
+  const getIcon = (dept) => {
+    if (!dept) return "🏛️";
+    const d = dept.toLowerCase();
+    if (d.includes("wing") || d.includes("american")) return "🇺🇸";
+    if (d.includes("arms") || d.includes("armor")) return "⚔️";
+    if (d.includes("european") || d.includes("sculpture")) return "🗿";
+    if (d.includes("paintings")) return "🎨";
+    return "🏺";
+  };
+
   return (
     <button type="button" className="search-card" onClick={onClick}>
-      <ThumbFallback title={item.title} />
+      <ObjectThumbnail imageUrl={item.image_url} title={item.title} />
       <div className="card-info">
-        <span className="card-id">Object ID: {item.object_id}</span>
+        <div className="card-badge-row">
+          <span className="museum-mini-badge">
+            {getIcon(item.department)} {item.department || "General"}
+          </span>
+        </div>
+        <span className="card-id">ID: {item.object_id}</span>
         <h4 className="card-title">{item.title}</h4>
-        <p className="card-meta">Culture: {item.culture || "unknown"}</p>
-        <p className="card-meta">Department: {item.department || "unknown"}</p>
+        
+        {/* Εμφάνιση του υλικού ή της χρονολογίας με πιο κομψό τρόπο */}
+        <p className="card-meta-text">
+          <span>🌍 {item.culture || "Άγνωστη κουλτούρα"}</span>
+          {item.year && <span> • ⏳ {item.year}</span>}
+        </p>
       </div>
     </button>
   );
@@ -155,7 +253,7 @@ function SearchPanel({
       {selected && (
         <div className="selected-object-bar">
           <div className="selected-object-info">
-            <ThumbFallback title={selected.title} />
+            <ObjectThumbnail imageUrl={selected.image_url} title={selected.title} />
             <div className="card-info">
               <span className="card-id">Object ID: {selected.object_id}</span>
               <h4 className="card-title card-title--selected">{selected.title}</h4>
@@ -240,10 +338,20 @@ function ControlPanel({ limit, setLimit }) {
   );
 }
 
-function ConnectionCard({ item }) {
+function ConnectionCard({ item, sourceObject, onExplain }) {
   return (
     <div className="connection-card">
-      <ThumbFallback title={item.object.title} />
+      {/* 🖼️ Μεγάλη εικόνα για το αποτέλεσμα της συσχέτισης */}
+      <div className="conn-thumb-wrapper">
+        <img 
+          src={item.object.image_url} 
+          alt={item.object.title} 
+          className="conn-thumb"
+          onError={(e) => {
+            e.target.src = "https://images.unsplash.com/photo-1580136579312-94651dfd596d?w=500";
+          }}
+        />
+      </div>
       <div className="conn-info">
         <span className="card-id">Object ID: {item.object.object_id}</span>
         <h4 className="card-title">{item.object.title}</h4>
@@ -251,7 +359,14 @@ function ConnectionCard({ item }) {
         <p className="card-meta"><span className="meta-label">Department:</span> {item.object.department || "unknown"}</p>
         <p className="card-meta"><span className="meta-label">Similarity:</span> {item.cosine_similarity.toFixed(2)}</p>
         <p className="card-meta"><span className="meta-label">Probability:</span> {Math.round(item.probability * 100)}%</p>
-        <p className="conn-desc">{item.explanation}</p>
+        {/* <p className="conn-desc">{item.explanation}</p> */}
+        <button
+          type="button"
+          className="btn-explain-relationship"
+          onClick={() => onExplain(sourceObject, item.object)}
+        >
+          💬 Explain Relationship
+        </button>
       </div>
     </div>
   );
@@ -266,6 +381,7 @@ export default function App() {
   const [related, setRelated] = useState([]);
   const [loadingRelated, setLoadingRelated] = useState(false);
   const [error, setError] = useState(null);
+  const [explainState, setExplainState] = useState(null); // { open, loading, error, sourceObject, targetObject, explanation, metrics }
 
   const skipNextSearchRef = useRef(false);
 
@@ -317,6 +433,52 @@ export default function App() {
         setLoadingRelated(false);
       });
   }, [selected, limit]);
+
+  const handleExplainRelationship = useCallback((sourceObject, targetObject) => {
+    if (!sourceObject || !targetObject) return;
+
+    setExplainState({
+      open: true,
+      loading: true,
+      error: null,
+      sourceObject,
+      targetObject,
+      explanation: null,
+      metrics: null,
+    });
+
+    fetch(`${API_BASE}/explain-relationship`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source_object_id: sourceObject.object_id,
+        target_object_id: targetObject.object_id,
+      }),
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`Server returned ${res.status}`);
+        return res.json();
+      })
+      .then((data) => {
+        setExplainState((prev) => ({
+          ...prev,
+          loading: false,
+          explanation: data.explanation || "No explanation was returned.",
+          metrics: data.metrics || data.similarity_metrics || null,
+        }));
+      })
+      .catch(() => {
+        setExplainState((prev) => ({
+          ...prev,
+          loading: false,
+          error: "Could not generate an explanation right now. Please try again.",
+        }));
+      });
+  }, []);
+
+  const closeExplainModal = useCallback(() => {
+    setExplainState((prev) => (prev ? { ...prev, open: false } : prev));
+  }, []);
 
   return (
     <div className="app-container">
@@ -376,7 +538,7 @@ export default function App() {
             ) : (
               <div className="connection-cards-stack">
                 {related.map((item) => (
-                  <ConnectionCard key={item.object.object_id} item={item} />
+                  <ConnectionCard key={item.object.object_id} item={item} sourceObject={selected} onExplain={handleExplainRelationship} />
                 ))}
               </div>
             )}
@@ -384,6 +546,7 @@ export default function App() {
         </div>
       </main>
       {error && <p className="page__error" style={{ textAlign: "center", padding: "1rem" }}>{error}</p>}
+      <ExplainModal state={explainState} onClose={closeExplainModal} />
     </div>
   );
 }

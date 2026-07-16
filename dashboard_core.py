@@ -34,6 +34,7 @@ sys.path.append(str(Path(__file__).resolve().parent))
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from graph_features import load_graph, GraphTopologyIndex, Node2VecEmbeddings
+import dashboard_cache
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -67,6 +68,7 @@ class DashboardData:
         ids_path: str,
         model_path: str,
         graph_path: str = "graph/graph.graphml",
+        cache_path: str = "dashboard_cache.db",
     ):
         self.df = pd.read_csv(metadata_path, low_memory=False).set_index("Object ID")
         vectors = np.load(embeddings_path)
@@ -91,6 +93,13 @@ class DashboardData:
         # Determine the cache folder dynamically based on where graph_path is located
         cache_dir = Path(graph_path).parent.parent / "cache"
         self.node2vec = Node2VecEmbeddings(self.graph, cache_path=cache_dir / "node2vec_embeddings.pkl")
+
+        # Query-result cache (SQLite): avoids re-running nearest-neighbor
+        # search + feature computation + model inference + LLM explanation
+        # for an (object_id) or (object_id, candidate_id) pair that was
+        # already served before. See dashboard_cache.py for the schema.
+        self.db = dashboard_cache.connect(cache_path)
+        logger.info("Dashboard cache ready at %s (%s)", cache_path, dashboard_cache.cache_stats(self.db))
 
     def object_info(self, object_id: int) -> dict:
         row = self.df.loc[object_id]
@@ -169,6 +178,59 @@ class DashboardData:
         X = pd.DataFrame([{c: features[c] for c in feature_cols}])
         return float(self.model.predict_proba(X)[0, 1])
 
+    def get_related_objects(self, object_id: int, k: int = 8) -> list[tuple[int, dict, float]]:
+        """Top-k related objects for `object_id`, sorted by predicted
+        probability descending -- from the SQLite cache when available,
+        computed fresh (and cached for next time) otherwise.
+
+        This is the one call the UI should use instead of manually chaining
+        nearest_neighbors() -> build_features() -> predict_link_probability()
+        for every candidate, since those three steps are exactly what the
+        cache is meant to skip on a repeat query.
+        """
+        cached = dashboard_cache.get_cached_neighbors(self.db, object_id, k)
+        if cached is not None:
+            return [
+                (row["candidate_id"], {key: row[key] for key in dashboard_cache.NEIGHBOR_FEATURE_KEYS}, row["probability"])
+                for row in cached
+            ]
+
+        # Cache miss: compute up to MAX_CACHED_NEIGHBORS so future requests
+        # for a smaller (or equal) k are served straight from the cache,
+        # even if this particular request only asked for fewer.
+        compute_k = max(k, dashboard_cache.MAX_CACHED_NEIGHBORS)
+        neighbors = self.nearest_neighbors(object_id, k=compute_k)
+
+        scored_rows = []
+        for candidate_id, cosine in neighbors:
+            features = self.build_features(object_id, candidate_id, cosine)
+            probability = self.predict_link_probability(features)
+            row = {"candidate_id": candidate_id, "probability": probability}
+            row.update({key: features[key] for key in dashboard_cache.NEIGHBOR_FEATURE_KEYS})
+            scored_rows.append(row)
+        scored_rows.sort(key=lambda r: -r["probability"])
+
+        dashboard_cache.store_neighbors(self.db, object_id, scored_rows)
+
+        top_k = scored_rows[:k]
+        return [
+            (row["candidate_id"], {key: row[key] for key in dashboard_cache.NEIGHBOR_FEATURE_KEYS}, row["probability"])
+            for row in top_k
+        ]
+
+    def explain_link_cached(self, object_id: int, candidate_id: int, info_a: dict, info_b: dict,
+                             features: dict, probability: float) -> str:
+        """Same output as explain_link(), but reuses a previously generated
+        explanation for this exact (object_id, candidate_id) pair instead of
+        making another Ollama call."""
+        cached = dashboard_cache.get_cached_explanation(self.db, object_id, candidate_id)
+        if cached is not None:
+            return cached
+
+        explanation = explain_link(info_a, info_b, features, probability)
+        dashboard_cache.store_explanation(self.db, object_id, candidate_id, explanation)
+        return explanation
+
 
 def explain_link(info_a: dict, info_b: dict, features: dict, probability: float) -> str:
     """Ask the local LLM for a plain-language rationale. Falls back to a
@@ -225,15 +287,13 @@ def demo(metadata_path: str, embeddings_path: str, ids_path: str, model_path: st
     query_info = data.object_info(object_id)
     print(f"\nQuery object: {query_info}\n")
 
-    neighbors = data.nearest_neighbors(object_id, k=top_k)
-    for candidate_id, cosine in neighbors:
-        features = data.build_features(object_id, candidate_id, cosine)
-        probability = data.predict_link_probability(features)
+    related = data.get_related_objects(object_id, k=top_k)
+    for candidate_id, features, probability in related:
         candidate_info = data.object_info(candidate_id)
 
         print(f"--- Candidate {candidate_id}: {candidate_info['title']} "
               f"(probability={probability:.2%}) ---")
-        explanation = explain_link(query_info, candidate_info, features, probability)
+        explanation = data.explain_link_cached(object_id, candidate_id, query_info, candidate_info, features, probability)
         print(explanation)
         print()
 

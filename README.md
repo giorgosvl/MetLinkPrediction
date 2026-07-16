@@ -61,7 +61,7 @@ embeddings/                  graph/
                 fuzzy/
                    |
                    v
- dashboard_core.py + Streamlit / FastAPI / React
+ dashboard_core.py + dashboard_cache.py + Streamlit / FastAPI / React
 ```
 
 ## Δομή Project
@@ -78,7 +78,11 @@ embeddings/                  graph/
 ├── 09_dashboard_app.py
 ├── 10_calibration_check.py
 ├── 11_check_separability.py
+├── 12_precompute_dashboard_cache.py
+├── dashboard_cache.py
 ├── dashboard_core.py
+├── fast_assemble_cache.py
+├── precompute_explanations.py
 ├── graph_features.py
 ├── MetObjects.txt
 ├── met_clean.csv
@@ -446,6 +450,8 @@ fuzzy/fuzzy_ablation_results.json
 
 ```text
 dashboard_core.py
+dashboard_cache.py
+12_precompute_dashboard_cache.py
 09_dashboard_app.py
 webapp_mus/
 ```
@@ -460,6 +466,16 @@ webapp_mus/
 4. προβλέπει link probability,
 5. ζητά από το local LLM σύντομη curator-friendly εξήγηση,
 6. αν το LLM δεν είναι διαθέσιμο, επιστρέφει deterministic fallback explanation.
+
+Η νεότερη έκδοση προσθέτει SQLite-backed cache μέσω `dashboard_cache.py`. Το cache κρατά:
+
+- precomputed neighbor predictions για κάθε query object,
+- feature values και predicted probabilities,
+- προαιρετικά cached explanation text ανά object pair.
+
+Αυτό μειώνει σημαντικά το latency στο dashboard, επειδή ένα επαναλαμβανόμενο query μπορεί να εξυπηρετηθεί ως απλό SQLite read αντί να ξανατρέχει embedding search, graph feature lookup, XGBoost inference και LLM explanation.
+
+Το `12_precompute_dashboard_cache.py` μπορεί να ζεστάνει το cache πριν από demo ή παρουσίαση. Το ίδιο το `dashboard_cache.db` δεν γίνεται commit επειδή είναι generated SQLite artifact και μπορεί να ξεπεράσει το 1 GB.
 
 Υπάρχουν δύο UI επιλογές:
 
@@ -520,6 +536,14 @@ python 10_calibration_check.py --model fuzzy/link_predictor_fuzzy.joblib --datas
 python 11_check_separability.py --dataset fuzzy/link_prediction_dataset_with_fuzzy.csv
 ```
 
+Dashboard cache precompute:
+
+```bash
+python 12_precompute_dashboard_cache.py
+python 12_precompute_dashboard_cache.py --limit 500
+python 12_precompute_dashboard_cache.py --explanations-top-n 3
+```
+
 ## Εκτέλεση Dashboard
 
 ### Streamlit
@@ -527,6 +551,8 @@ python 11_check_separability.py --dataset fuzzy/link_prediction_dataset_with_fuz
 ```bash
 streamlit run 09_dashboard_app.py
 ```
+
+Αν έχει προηγηθεί πλήρες `12_precompute_dashboard_cache.py`, τα περισσότερα dashboard queries εξυπηρετούνται απευθείας από το `dashboard_cache.db`.
 
 ### FastAPI + React
 
@@ -570,7 +596,7 @@ git lfs install
 git lfs pull
 ```
 
-Το `cache/` δεν γίνεται commit, επειδή περιέχει επαναδημιουργήσιμα Node2Vec cache files.
+Το `cache/` δεν γίνεται commit, επειδή περιέχει επαναδημιουργήσιμα Node2Vec cache files. Το `dashboard_cache.db` επίσης δεν γίνεται commit, επειδή είναι generated SQLite cache και ξαναχτίζεται με `12_precompute_dashboard_cache.py`.
 
 ## Κύριες Τεχνικές Αποφάσεις
 
