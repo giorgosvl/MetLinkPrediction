@@ -58,6 +58,15 @@ class ExplainResponse(BaseModel):
     explanation: str
     metrics: dict
 
+class AISearchRequest(BaseModel):
+    query: str
+    previous_object_ids: list[int] | None = None
+
+class AISearchResponse(BaseModel):
+    intent: dict
+    summary: str
+    results: list[ObjectSummary]
+
 DF_META: pd.DataFrame | None = None
 
 @app.on_event("startup")
@@ -196,6 +205,326 @@ def save_explanation_to_db(query_id: int, candidate_id: int, explanation: str):
         print(f"Warning: Could not cache explanation to DB: {e}")
     finally:
         conn.close()
+
+# ----------------------------------------------------------------------
+# 🧭 AI MUSEUM ASSISTANT -- natural language search
+#
+# Design (matches the brief): the LLM NEVER answers from its own knowledge
+# and never decides what's "related" -- it only (a) turns the user's
+# sentence into structured filters/intent, and (b) afterwards writes a
+# plain-language summary of what the REAL pipeline (pandas filtering +
+# the already-existing link-prediction cache) found. All of the actual
+# search/graph/link-prediction logic is 100% reused, untouched.
+# ----------------------------------------------------------------------
+
+AI_INTENT_PROMPT = """You are a query-understanding system for a museum search application. You do NOT answer the user's question yourself -- you only extract structured intent as JSON.
+
+Output ONLY a valid JSON object, no markdown, no explanation, in exactly this schema:
+{{
+  "intent": "search" | "filter_previous" | "explain_single" | "compare" | "chat",
+  "culture": string or null,
+  "material": string or null,
+  "department": string or null,
+  "object_type": string or null,
+  "year_start": integer or null,
+  "year_end": integer or null,
+  "keywords": [string, ...],
+  "target_index": integer or null,
+  "target_index_2": integer or null
+}}
+
+Rules:
+- "search": a brand new, independent search request.
+- "filter_previous": narrows down the list of results ALREADY shown in this conversation.
+- "explain_single": asks to explain/describe ONE specific item from the previous results.
+- "compare": asks to compare TWO items from the previous results.
+- "chat": general conversation, greetings, jokes, or ANY request about topics unrelated to museum objects (e.g. recipes, pastitsio).
+- Leave any field null / empty list if not mentioned. Never invent values not implied by the message.
+- IMPORTANT TRANSLATION & TYPO RULES: The museum catalog is in ENGLISH. The user might write in Greek with heavy spelling mistakes or typos (e.g., "μαχέρια" instead of "μαχαίρια", "σπαθια", "ασπιδες"). You MUST understand the intended meaning first, correct the typo in your mind, and then translate it into the correct English museum terms.
+  Examples: 
+  - "δειξε μου μαχερια" -> object_type: "knife", keywords: ["knife", "dagger"]
+  - "σπαθια" -> object_type: "sword", keywords: ["sword"]
+  - "αγαλματα" -> object_type: "statue", keywords: ["statue", "sculpture"]
+
+There are currently {history_note} previous results in this conversation.
+
+User message: "{query}"
+
+Output ONLY the JSON object, nothing else.
+"""
+
+def extract_intent_via_ollama(query: str, has_previous_results: bool) -> dict:
+    """Ask Ollama to turn the free-text query into structured intent. Falls
+    back to a plain 'search with the raw text as a keyword' intent if the
+    model is unreachable or returns something unparseable -- the feature
+    should degrade gracefully, not hard-fail, when Ollama is slow/down."""
+    history_note = "some" if has_previous_results else "no"
+    prompt = AI_INTENT_PROMPT.format(history_note=history_note, query=query)
+
+    fallback = {
+        "intent": "search",
+        "culture": None,
+        "material": None,
+        "department": None,
+        "object_type": None,
+        "keywords": [query],
+        "target_index": None,
+        "target_index_2": None,
+    }
+
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": {"temperature": 0, "num_predict": 200},
+            },
+            timeout=60.0,
+        )
+        if response.status_code != 200:
+            return fallback
+        raw = response.json().get("response", "").strip()
+        parsed = json.loads(raw)
+        # Merge over the fallback so any missing key still has a safe default.
+        merged = {**fallback, **parsed}
+        if merged.get("intent") not in ("search", "filter_previous", "explain_single", "compare", "chat"):
+            merged["intent"] = "search"
+        if not isinstance(merged.get("keywords"), list):
+            merged["keywords"] = []
+        return merged
+    except Exception as e:
+        print(f"Intent extraction failed, falling back to plain search: {e}")
+        return fallback
+
+
+def filter_objects_by_intent(intent: dict, candidate_ids: list[int] | None) -> list[int]:
+    global DF_META
+    if DF_META is None:
+        return []
+
+    df = DF_META.copy()
+    if candidate_ids is not None and len(candidate_ids) > 0:
+        df = df[df["Object ID"].isin(candidate_ids)]
+
+    def contains(column: str, value: str):
+        if column not in df.columns:
+            return pd.Series(False, index=df.index)
+        return df[column].astype(str).str.contains(value, case=False, na=False, regex=False)
+
+    mask = pd.Series(True, index=df.index)
+
+    # 1. 🏛️ ΕΞΥΠΝΗ ΑΥΣΤΗΡΟΤΗΤΑ ΓΙΑ ΠΟΛΙΤΙΣΜΟ / ΧΩΡΑ
+    if intent.get("culture"):
+        cult = intent["culture"].strip()
+        culture_col = "culture" if "culture" in df.columns else "Culture"
+        cult_base = cult.replace("ian", "").replace("ish", "").replace("greek", "gree")
+        
+        culture_mask = contains(culture_col, cult) | contains(culture_col, cult_base) | contains("Department", cult)
+        if "Classification" in df.columns:
+            culture_mask |= contains("Classification", cult)
+            
+        mask &= culture_mask
+
+    # 2. 📅 ΑΠΟΛΥΤΑ ΑΥΣΤΗΡΟ ΦΙΛΤΡΟ ΓΙΑ ΗΜΕΡΟΜΗΝΙΕΣ (1800-1900 κλπ)
+    year_start = intent.get("year_start")
+    year_end = intent.get("year_end")
+    if year_start is not None and year_end is not None:
+        begin_dates = pd.to_numeric(df["Object Begin Date"], errors="coerce")
+        end_dates = pd.to_numeric(df["Object End Date"], errors="coerce")
+        mask &= (begin_dates >= float(year_start)) & (end_dates <= float(year_end))
+
+    # 3. Φιλτράρισμα για Υλικό (Material)
+    if intent.get("material"):
+        mask &= contains("Medium", intent["material"])
+
+    # 4. Φιλτράρισμα για Τμήμα (Department)
+    if intent.get("department"):
+        mask &= contains("Department", intent["department"])
+
+    # 5. Φιλτράρισμα για Keywords & Object Types
+    search_terms = intent.get("keywords") or []
+    if intent.get("object_type") and intent["object_type"] not in search_terms:
+        search_terms.append(intent["object_type"])
+    
+    # Αφαιρούμε τα stop-words του πολιτισμού από τα keywords τίτλου
+    if intent.get("culture"):
+        cult_word = intent["culture"].lower()
+        cult_base2 = cult_word.replace("ian", "").replace("ish", "")
+        search_terms = [
+            t for t in search_terms 
+            if t.lower() not in [cult_word, cult_base2, "egypt", "egyptian", "greek", "roman", "american", "america"]
+        ]
+
+    search_terms = [t.strip() for t in search_terms if t and len(t.strip()) > 1]
+
+    if search_terms:
+        kw_mask = pd.Series(False, index=df.index)
+        
+        # 💡 ΝΕΑ ΠΡΟΣΘΗΚΗ: Ανίχνευση για μαχαίρια/σπαθιά (ελληνικά, αγγλικά ή ανορθόγραφα)
+        terms_lower = [t.lower() for t in search_terms]
+        is_knife_or_weapon = any(
+            "μαχ" in w or "mach" in w or "max" in w or w in ["knife", "knives", "dagger", "sword", "weapon", "weapons"]
+            for w in terms_lower
+        )
+
+        if is_knife_or_weapon:
+            # Αν ο χρήστης ψάχνει μαχαίρια, εξαναγκάζουμε το pandas να κοιτάξει στο σωστό department
+            # και να ψάξει τις σωστές αγγλικές λέξεις "knife" και "dagger", προσπερνώντας το typo!
+            kw_mask |= contains("Department", "Arms and Armor") | contains("Class", "Arms")
+            kw_mask |= contains("Title", "knife") | contains("Title", "dagger") | contains("Object Name", "knife")
+
+        # Κλασικό φιλτράρισμα για τα υπόλοιπα keywords
+        for term in search_terms:
+            kw_mask |= contains("Title", term) | contains("Object Name", term)
+            if "Tags" in df.columns:
+                kw_mask |= contains("Tags", term)
+                
+        mask &= kw_mask
+
+    matched = df[mask]
+    ids = [int(oid) for oid in matched["Object ID"].tolist() if pd.notna(oid)]
+    return ids[:24]
+
+
+def generate_ai_summary_live(query: str, result_infos: list[dict]) -> str:
+    """One short LLM-written summary of what the (already computed) search
+    found. The LLM is given ONLY the titles/culture/department it should
+    talk about -- it cannot add facts the search didn't actually return."""
+    if not result_infos:
+        return "Δεν βρέθηκαν αντικείμενα που να ταιριάζουν με το ερώτημά σου. Δοκίμασε διαφορετικούς όρους."
+
+    lines = "\n".join(
+        f"- {r['title']} ({r.get('culture') or 'άγνωστος πολιτισμός'}, {r.get('department') or 'άγνωστο τμήμα'})"
+        for r in result_infos[:12]
+    )
+    prompt = f"""You are a museum research assistant. The user asked: "{query}"
+
+The search pipeline (not you) found these {len(result_infos)} matching objects:
+{lines}
+
+Write a short, engaging 2-3 sentence summary in Greek describing what was found and any obvious shared pattern (culture, department, material). Use ONLY the facts listed above -- do not invent anything. Do not use markdown other than bolding."""
+
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.3, "num_predict": 300},
+            },
+            timeout=120.0,
+        )
+        if response.status_code == 200:
+            return response.json().get("response", "").strip()
+        return f"Βρέθηκαν {len(result_infos)} αντικείμενα που ταιριάζουν με το ερώτημά σου."
+    except Exception as e:
+        print(f"AI summary generation failed: {e}")
+        return f"Βρέθηκαν {len(result_infos)} αντικείμενα που ταιριάζουν με το ερώτημά σου. (Το Ollama δεν απάντησε -- δείχνω μόνο τα αποτελέσματα.)"
+
+
+def generate_object_description_live(obj_info: dict) -> str:
+    """Single-object plain-language description, used by the 'explain_single'
+    intent (e.g. 'tell me about the first one')."""
+    prompt = f"""You are an expert museum curator. Describe the following museum object engagingly, in Greek, in 2-3 sentences. Use ONLY the facts given -- do not invent anything.
+
+Title: {obj_info.get('title')}
+Culture: {obj_info.get('culture') or 'unknown'}
+Department: {obj_info.get('department') or 'unknown'}
+Medium/Material: {obj_info.get('medium') or 'unknown'}
+Date/Era: {obj_info.get('year') or 'unknown'}"""
+
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.3, "num_predict": 300},
+            },
+            timeout=120.0,
+        )
+        if response.status_code == 200:
+            return response.json().get("response", "").strip()
+        return "📝 *Ollama service is busy. Unable to generate a description.*"
+    except Exception as e:
+        print(f"Object description generation failed: {e}")
+        return "📝 *Ollama is not running locally. Run 'ollama serve' and try again.*"
+
+
+def generate_chat_reply_live(query: str) -> str:
+    """Fallback for messages that aren't a search/filter/explain/compare --
+    a short, on-topic reply that nudges the user back towards the museum
+    search, without pretending to browse the collection itself."""
+    prompt = f"""You are a friendly museum research assistant embedded in a search tool for the Metropolitan Museum of Art collection. The user said: "{query}"
+
+This is not a search request. Reply briefly (1-2 sentences, in Greek), and if relevant, suggest they try a search like "Show me Greek helmets" or "Find Egyptian ceremonial objects"."""
+
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.4, "num_predict": 300},
+            },
+            timeout=90.0,
+        )
+        if response.status_code == 200:
+            return response.json().get("response", "").strip()
+        return "Πες μου τι θα ήθελες να αναζητήσεις στη συλλογή του μουσείου."
+    except Exception:
+        return "Πες μου τι θα ήθελες να αναζητήσεις στη συλλογή του μουσείου."
+
+
+def fetch_pair_features(source_id: int, target_id: int) -> tuple[dict, float]:
+    """Same lookup /api/explain-relationship does, factored out so the
+    'compare' intent below can reuse it without duplicating the DB logic."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("PRAGMA table_info(neighbor_predictions);")
+        columns = [col[1] for col in cursor.fetchall()]
+        feat_col = "features_json" if "features_json" in columns else ("features" if "features" in columns else None)
+        prob_col = "probability" if "probability" in columns else ("score" if "score" in columns else "predicted_prob")
+
+        def fetch(a: int, b: int):
+            if feat_col:
+                cursor.execute(
+                    f"SELECT {feat_col} AS feat, {prob_col} AS prob FROM neighbor_predictions WHERE object_id = ? AND candidate_id = ?",
+                    (a, b),
+                )
+            else:
+                cursor.execute(
+                    f"SELECT NULL AS feat, {prob_col} AS prob FROM neighbor_predictions WHERE object_id = ? AND candidate_id = ?",
+                    (a, b),
+                )
+            return cursor.fetchone()
+
+        row = fetch(source_id, target_id) or fetch(target_id, source_id)
+        features: dict = {}
+        probability = 0.0
+        if row is not None:
+            if row["feat"]:
+                try:
+                    raw = row["feat"]
+                    features = json.loads(raw) if isinstance(raw, str) else dict(raw)
+                except Exception:
+                    features = {}
+            probability = float(row["prob"]) if row["prob"] is not None else 0.0
+
+        features["cosine_similarity"] = float(features.get("cosine_similarity", features.get("cosine", 0.0)))
+        features["shared_culture"] = bool(features.get("shared_culture", False))
+        features["shared_department"] = bool(features.get("shared_department", False))
+        return features, probability
+    finally:
+        conn.close()
+
 
 # ----------------------------------------------------------------------
 # API ENDPOINTS
@@ -416,6 +745,79 @@ def explain_relationship(payload: ExplainRequest):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         conn.close()
+
+
+@app.post("/api/ai-search", response_model=AISearchResponse)
+def ai_search(payload: AISearchRequest):
+    """Natural-language front door to the EXISTING search pipeline. The LLM
+    only classifies intent + extracts filters (or writes the final summary);
+    the actual search/filter/compare work reuses get_object_info(),
+    filter_objects_by_intent() (plain pandas over the same DF_META
+    /api/search already uses), and fetch_pair_features() /
+    generate_ollama_explanation_live() for comparisons -- nothing about the
+    Knowledge Graph or Link Prediction pipeline is touched or reimplemented."""
+    global DF_META
+    if DF_META is None:
+        raise HTTPException(status_code=503, detail="Data not loaded yet")
+
+    previous_ids = payload.previous_object_ids or []
+    has_previous = len(previous_ids) > 0
+
+    intent = extract_intent_via_ollama(payload.query, has_previous)
+    kind = intent.get("intent", "search")
+
+    try:
+        if kind == "filter_previous" and has_previous:
+            ids = filter_objects_by_intent(intent, candidate_ids=previous_ids)
+            results = [get_object_info(oid) for oid in ids]
+            summary = generate_ai_summary_live(payload.query, results)
+            return AISearchResponse(intent=intent, summary=summary, results=[ObjectSummary(**r) for r in results])
+
+        if kind == "explain_single" and has_previous and intent.get("target_index"):
+            idx = int(intent["target_index"]) - 1
+            if 0 <= idx < len(previous_ids):
+                obj_info = get_object_info(previous_ids[idx])
+                summary = generate_object_description_live(obj_info)
+                return AISearchResponse(intent=intent, summary=summary, results=[ObjectSummary(**obj_info)])
+            return AISearchResponse(
+                intent=intent,
+                summary="Δεν βρήκα αυτό το αντικείμενο στα προηγούμενα αποτελέσματα.",
+                results=[],
+            )
+
+        if kind == "compare" and has_previous and intent.get("target_index") and intent.get("target_index_2"):
+            idx1 = int(intent["target_index"]) - 1
+            idx2 = int(intent["target_index_2"]) - 1
+            if 0 <= idx1 < len(previous_ids) and 0 <= idx2 < len(previous_ids):
+                info1 = get_object_info(previous_ids[idx1])
+                info2 = get_object_info(previous_ids[idx2])
+                features, probability = fetch_pair_features(previous_ids[idx1], previous_ids[idx2])
+                summary = generate_ollama_explanation_live(info1, info2, features, probability)
+                return AISearchResponse(
+                    intent=intent, summary=summary,
+                    results=[ObjectSummary(**info1), ObjectSummary(**info2)],
+                )
+            return AISearchResponse(
+                intent=intent,
+                summary="Δεν βρήκα και τα δύο αντικείμενα στα προηγούμενα αποτελέσματα.",
+                results=[],
+            )
+
+        if kind == "chat":
+            summary = generate_chat_reply_live(payload.query)
+            return AISearchResponse(intent=intent, summary=summary, results=[])
+
+        # Default: fresh "search" intent (also the fallback for
+        # filter_previous/explain_single/compare when there's no history yet).
+        ids = filter_objects_by_intent(intent, candidate_ids=None)
+        results = [get_object_info(oid) for oid in ids]
+        summary = generate_ai_summary_live(payload.query, results)
+        return AISearchResponse(intent=intent, summary=summary, results=[ObjectSummary(**r) for r in results])
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/health")
