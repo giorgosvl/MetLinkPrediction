@@ -1,14 +1,58 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import "./App.css";
+import "./home.css";
+import TopBar from "./components/TopBar.jsx";
+import Sidebar from "./components/Sidebar.jsx";
+import RightPanel from "./components/RightPanel.jsx";
+import HeroSection from "./components/HeroSection.jsx";
+import FeaturedArtifacts from "./components/FeaturedArtifacts.jsx";
+import VisualExplorationTimeline from "./components/VisualExplorationTimeline.jsx";
+import MapView from "./components/MapView.jsx";
 
 const API_BASE = "http://localhost:4345/api";
 
 const STATS_DATA = [
-  { count: "52,356", label: "Objects in Graph", icon: "📦" },
-  { count: "180,742", label: "Relations Map", icon: "🌿" },
-  { count: "94%", label: "Avg. Confidence", icon: "🛡️" },
-  { count: "12,842", label: "Cultures & Periods", icon: "👥" }
+  { count: "52,356", label: "Objects in Graph", icon: "📦", delta: "+12%" },
+  { count: "180,742", label: "Relations Map", icon: "🌿", delta: "+18%" },
+  { count: "94%", label: "Avg. Confidence", icon: "🛡️", delta: "+5%" },
+  { count: "12,842", label: "Cultures & Periods", icon: "👥", delta: "+8%" }
 ];
+
+// Βοηθητική συνάρτηση για τη μετατροπή των ** σε πραγματικό Bold (strong) JSX
+const renderFormattedText = (text) => {
+  if (!text) return "";
+
+  // 1. Χωρίζουμε πρώτα με βάση τις αλλαγές γραμμής (\n) για να κρατήσουμε τη δομή
+  const lines = text.split("\n");
+
+  return lines.map((line, lineIdx) => {
+    // 2. Regex που πιάνει τα **κείμενο** ακόμα κι αν υπάρχουν ενδιάμεσα κενά
+    const parts = line.split(/(\*\*.*?\*\*)/g);
+
+    const renderedLine = parts.map((part, partIdx) => {
+      if (part.startsWith("**") && part.endsWith("**")) {
+        // Αφαιρούμε τα αστεράκια και καθαρίζουμε τυχόν κενά στα άκρα
+        const cleanText = part.slice(2, -2).trim();
+        return (
+          <strong 
+            key={`${lineIdx}-${partIdx}`} 
+            style={{ fontWeight: "800", color: "#ffffff" }} // Force bold & φωτεινό χρώμα
+          >
+            {cleanText}
+          </strong>
+        );
+      }
+      return part;
+    });
+
+    // Επιστρέφουμε τη γραμμή τυλιγμένη σε ένα div ή προσθέτουμε <br />
+    return (
+      <div key={lineIdx} style={{ marginBottom: "8px", lineHeight: "1.6" }}>
+        {renderedLine}
+      </div>
+    );
+  });
+};
 
 function ExplainModal({ state, onClose }) {
   if (!state || !state.open) return null;
@@ -86,7 +130,7 @@ function ExplainModal({ state, onClose }) {
 
               {/* Explanation Text */}
               <div className="analysis-narrative-text">
-                {explanation ? explanation.replace(/\*\*/g, "") : ""}
+                {renderFormattedText(explanation)}
               </div>
 
               {/* Metrics Card */}
@@ -181,6 +225,7 @@ export default function App() {
   // 💡 ΔΗΜΙΟΥΡΓΙΑ REFS ΓΙΑ ΤΟ ΑΥΤΟΜΑΤΟ SCROLL
   const explorerResultsRef = useRef(null);
   const chatEndRef = useRef(null);
+  const topSearchInputRef = useRef(null);
 
   // 💡 EFFECT 1: Αυτόματο scroll στα αποτελέσματα του Explorer
   useEffect(() => {
@@ -196,7 +241,8 @@ export default function App() {
     }
   }, [aiMessages, aiLoading, activeTab]);
 
-  // Live Search
+  // Live Search (debounced -- firing a request on every single keystroke
+  // made the results feel like they were always a letter behind)
   useEffect(() => {
     if (skipNextSearchRef.current) {
       skipNextSearchRef.current = false;
@@ -207,18 +253,20 @@ export default function App() {
       return;
     }
     const controller = new AbortController();
-    fetch(`${API_BASE}/search?q=${encodeURIComponent(searchQuery)}&limit=${radius}`, {
-      signal: controller.signal,
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        setSearchResults(data);
-        setRelated([]); 
+    const debounceTimer = setTimeout(() => {
+      fetch(`${API_BASE}/search?q=${encodeURIComponent(searchQuery)}&limit=${radius}`, {
+        signal: controller.signal,
       })
-      .catch((err) => {
-        if (err.name !== "AbortError") setError("Could not reach the API.");
-      });
-    return () => controller.abort();
+        .then((res) => res.json())
+        .then((data) => {
+          setSearchResults(data);
+          setRelated([]);
+        })
+        .catch((err) => {
+          if (err.name !== "AbortError") setError("Could not reach the API.");
+        });
+    }, 300);
+    return () => { clearTimeout(debounceTimer); controller.abort(); };
   }, [searchQuery, radius]);
 
   // Φόρτωση του επιλεγμένου αντικειμένου στο Workspace
@@ -404,149 +452,132 @@ export default function App() {
       });
   }, [aiQuery, aiLastResultIds, aiLoading]);
 
-  return (
-    <div className="app-container">
-      <header className="global-header">
-        <div className="brand-wrapper">
-          <div className="brand-badge">THE MET</div>
-          <span className="brand-title">Knowledge Graph</span>
-        </div>
-        <nav className="nav-links">
-          <span className={`nav-item ${activeTab === "explorer" ? "active" : ""}`} onClick={() => setActiveTab("explorer")}>Explorer</span>
-          <span className={`nav-item ${activeTab === "collections" ? "active" : ""}`} onClick={() => setActiveTab("collections")}>Collections ({savedCollections.length})</span>
-          <span className={`nav-item ${activeTab === "matrix" ? "active" : ""}`} onClick={() => setActiveTab("matrix")}>Relations Matrix</span>
-          <span className={`nav-item ${activeTab === "assistant" ? "active" : ""}`} onClick={() => setActiveTab("assistant")}>✨ AI Assistant</span>
-        </nav>
-        <div className="model-pipeline-badge">
-          <div className="pipeline-status-pill"><span className="pulse-dot"></span><span>Vector DB: Connected</span></div>
-          <div className="model-name-pill"><span>🤖 llama3.1</span></div>
-        </div>
-      </header>
+  const isExplorerEmpty = searchResults.length === 0 && related.length === 0 && !loadingRelated;
 
-      <div className="dashboard-workspace" style={{ display: "grid", gridTemplateColumns: "260px 1fr 320px", gap: "20px" }}>
-        
+  const handleStartExploring = useCallback(() => {
+    topSearchInputRef.current?.focus();
+  }, []);
+
+  const handlePopularSearch = useCallback((term) => {
+    setActiveTab("explorer");
+    skipNextSearchRef.current = false;
+    setSearchedBaseObject(null);
+    setSelected(null);
+    setSearchQuery(term);
+  }, []);
+
+  const handleSelectCountry = useCallback((country) => {
+    skipNextSearchRef.current = true;
+    setActiveTab("explorer");
+    setSearchQuery(country);
+    setSearchedBaseObject(null);
+    setSelected(null);
+    setRelated([]);
+    setError(null);
+    fetch(`${API_BASE}/objects-by-country?country=${encodeURIComponent(country)}&limit=${Math.max(radius, 12)}`)
+      .then((r) => r.json())
+      .then((data) => setSearchResults(Array.isArray(data) ? data : []))
+      .catch(() => setError(`Could not load objects for "${country}".`));
+  }, [radius]);
+
+  return (
+    <div className="app-container hg-shell">
+      <TopBar
+        searchQuery={searchQuery}
+        onSearchChange={(val) => { setActiveTab("explorer"); setSearchQuery(val); }}
+        onSubmitSearch={handleFindRelated}
+        onOpenAssistant={() => setActiveTab("assistant")}
+        inputRef={topSearchInputRef}
+      />
+
+      <div className="hg-body">
+
         {/* LEFT COLUMN */}
-        <aside className="left-filter-sidebar">
-          <h3 className="filter-headline">Filter & Controls</h3>
-          <div className="filter-group-wrapper">
-            <div className="filter-label-row"><span>Search Range (Radius)</span><span>{radius}</span></div>
-            <input type="range" className="range-slider-input" min="2" max="50" value={radius} onChange={(e) => setRadius(Number(e.target.value))} />
-          </div>
-          <div className="filter-group-wrapper">
-            <div className="filter-label-row"><span>Max Relations Grid</span><span>{limit}</span></div>
-            <input type="range" className="range-slider-input" min="1" max="50" value={limit} onChange={(e) => setLimit(Number(e.target.value))} />
-          </div>
-        </aside>
+        <Sidebar
+          activeTab={activeTab}
+          onSelectTab={setActiveTab}
+          radius={radius}
+          setRadius={setRadius}
+          limit={limit}
+          setLimit={setLimit}
+        />
 
         {/* CENTER COLUMN */}
-        <main className="center-content-arena">
+        <main className="hg-main">
           {activeTab === "explorer" && (
             <>
-              <div className="search-container-block">
-                <span style={{ color: "var(--text-muted)" }}>🔍</span>
-                <input
-                  type="text"
-                  className="search-input-field"
-                  placeholder="Search catalog by title, culture, or object ID..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') handleFindRelated(); }}
-                />
-                <button type="button" className="search-action-btn" onClick={handleFindRelated}>Search</button>
-              </div>
+              {isExplorerEmpty && (
+                <>
+                  <HeroSection
+                    objectCount={STATS_DATA[0].count}
+                    relationCount={STATS_DATA[1].count}
+                    onStartExploring={handleStartExploring}
+                    onPopularSearch={handlePopularSearch}
+                  />
+                  <FeaturedArtifacts onPick={handlePopularSearch} />
+                  <VisualExplorationTimeline />
+                </>
+              )}
 
-              <section className="statistics-grid-strip">
-                {STATS_DATA.map((stat, idx) => (
-                  <div className="stat-card-item" key={idx}>
-                    <div className="stat-icon-box">{stat.icon}</div>
-                    <div>
-                      <div className="stat-number">{stat.count}</div>
-                      <div className="stat-label">{stat.label}</div>
-                    </div>
+              {!isExplorerEmpty && (
+                <section style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+                  <h3 className="filter-headline" style={{ margin: 0 }}>
+                    {related.length > 0 ? `Objects related to "${searchedBaseObject?.title}"` : "Artifact Workspace"}
+                  </h3>
+
+                  {loadingRelated && <div style={{ color: "var(--text-muted)" }}>Calculating vector distances & relationships...</div>}
+
+                  {/* 💡 ΣΥΝΔΕΣΗ ΤΟΥ REF ΜΕ ΤΟ CONTAINER ΤΩΝ ΑΠΟΤΕΛΕΣΜΑΤΩΝ ΣΤΟΝ EXPLORER */}
+                  <div ref={explorerResultsRef} className="results-grid-container">
+                    {/* Live αποτελέσματα αναζήτησης */}
+                    {searchResults.length > 0 && searchResults.map((item) => (
+                      <div className="artifact-display-card" key={item.object_id} onClick={() => handleSelectSuggestion(item)}>
+                        <button type="button" className="bookmark-btn" onClick={(e) => { e.stopPropagation(); toggleSaveCollection(item); }}>
+                          {isBookmarked(item.object_id) ? "★" : "☆"}
+                        </button>
+                        <img src={item.image_url || "https://images.unsplash.com/photo-1580136579312-94651dfd596d?w=400"} alt={item.title} className="card-image-hero" />
+                        <div className="card-body-details">
+                          <h4 className="artifact-title-text">{item.title}</h4>
+                          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>ID: {item.object_id}</div>
+                        </div>
+                      </div>
+                    ))}
+
+                    {/* Αποτελέσματα Similarity */}
+                    {searchResults.length === 0 && related.map((item) => (
+                      <div 
+                        className={`artifact-display-card ${selected?.object_id === item.object.object_id ? "active-focus-card" : ""}`} 
+                        key={item.object.object_id} 
+                        onClick={() => setSelected(item.object)}
+                        style={{ 
+                          border: selected?.object_id === item.object.object_id ? "2px solid var(--accent-blue)" : "1px solid rgba(255,255,255,0.08)", 
+                          cursor: "pointer" 
+                        }}
+                      >
+                        <button type="button" className="bookmark-btn" onClick={(e) => { e.stopPropagation(); toggleSaveCollection(item.object); }}>
+                          {isBookmarked(item.object.object_id) ? "★" : "☆"}
+                        </button>
+                        <img src={item.object.image_url || "https://images.unsplash.com/photo-1580136579312-94651dfd596d?w=400"} alt={item.object.title} className="card-image-hero" />
+                        <div className="card-body-details">
+                          <h4 className="artifact-title-text">{item.object.title}</h4>
+                          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Similarity: {Math.round(item.cosine_similarity * 100)}%</div>
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </section>
-
-              <section style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-                <h3 className="filter-headline" style={{ margin: 0 }}>
-                  {related.length > 0 ? `Objects related to "${searchedBaseObject?.title}"` : "Artifact Workspace"}
-                </h3>
-
-                {loadingRelated && <div style={{ color: "var(--text-muted)" }}>Calculating vector distances & relationships...</div>}
-
-                {/* 💡 ΣΥΝΔΕΣΗ ΤΟΥ REF ΜΕ ΤΟ CONTAINER ΤΩΝ ΑΠΟΤΕΛΕΣΜΑΤΩΝ ΣΤΟΝ EXPLORER */}
-                <div ref={explorerResultsRef} className="results-grid-container">
-                  {/* Live αποτελέσματα αναζήτησης */}
-                  {searchResults.length > 0 && searchResults.map((item) => (
-                    <div className="artifact-display-card" key={item.object_id} onClick={() => handleSelectSuggestion(item)}>
-                      <button type="button" className="bookmark-btn" onClick={(e) => { e.stopPropagation(); toggleSaveCollection(item); }}>
-                        {isBookmarked(item.object_id) ? "★" : "☆"}
-                      </button>
-                      <img src={item.image_url || "https://images.unsplash.com/photo-1580136579312-94651dfd596d?w=400"} alt={item.title} className="card-image-hero" />
-                      <div className="card-body-details">
-                        <h4 className="artifact-title-text">{item.title}</h4>
-                        <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>ID: {item.object_id}</div>
-                      </div>
-                    </div>
-                  ))}
-
-                  {/* Αποτελέσματα Similarity */}
-                  {searchResults.length === 0 && related.map((item) => (
-                    <div 
-                      className={`artifact-display-card ${selected?.object_id === item.object.object_id ? "active-focus-card" : ""}`} 
-                      key={item.object.object_id} 
-                      onClick={() => setSelected(item.object)}
-                      style={{ 
-                        border: selected?.object_id === item.object.object_id ? "2px solid var(--accent-blue)" : "1px solid rgba(255,255,255,0.08)", 
-                        cursor: "pointer" 
-                      }}
-                    >
-                      <button type="button" className="bookmark-btn" onClick={(e) => { e.stopPropagation(); toggleSaveCollection(item.object); }}>
-                        {isBookmarked(item.object.object_id) ? "★" : "☆"}
-                      </button>
-                      <img src={item.object.image_url || "https://images.unsplash.com/photo-1580136579312-94651dfd596d?w=400"} alt={item.object.title} className="card-image-hero" />
-                      <div className="card-body-details">
-                        <h4 className="artifact-title-text">{item.object.title}</h4>
-                        <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Similarity: {Math.round(item.cosine_similarity * 100)}%</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                {searchResults.length === 0 && related.length === 0 && !loadingRelated && (
-                  <div className="premium-welcome-wrapper">
-                    <div className="premium-welcome-card">
-                      <h1 className="premium-welcome-title">Uncover Hidden Links</h1>
-                      
-                      <div className="premium-star-divider">
-                        <span className="divider-line"></span>
-                        <span className="divider-star">✦</span>
-                        <span className="divider-line"></span>
-                      </div>
-                      
-                      <p className="premium-welcome-subtitle">
-                        Ξεκινήστε πληκτρολογώντας έναν όρο στην αναζήτηση για να εντοπίσετε το αντικείμενο-στόχο. 
-                        Στη συνέχεια, πατήστε <strong>Search</strong> για να ενεργοποιήσετε τον AI υπολογισμό εγγύτητας (Similarity) στον Γράφο Γνώσης.
-                      </p>
-                      
-                      <div className="premium-welcome-badges">
-                        <span className="premium-badge badge-antiquities">
-                          <span className="badge-icon">🏛️</span> Antiquities
-                        </span>
-                        <span className="premium-badge badge-paintings">
-                          <span className="badge-icon">🎨</span> Paintings
-                        </span>
-                        <span className="premium-badge badge-arms">
-                          <span className="badge-icon">⚔️</span> Arms & Armor
-                        </span>
-                      </div>
-
-                    </div>
-                  </div>
-                )}
-              </section>
+                </section>
+              )}
             </>
           )}
+
+          {/* Kept permanently mounted (never unmounted) and just hidden via
+              CSS when not active. Leaflet's map instance is expensive to
+              tear down/recreate, and doing so on every tab switch is what
+              was causing markers to stop responding to clicks after the
+              first visit to this tab. */}
+          <div style={{ display: activeTab === "map" ? "block" : "none" }}>
+            <MapView onSelectCountry={handleSelectCountry} active={activeTab === "map"} />
+          </div>
 
           {activeTab === "collections" && (
             <section style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
@@ -801,9 +832,9 @@ export default function App() {
                     {msg.role === "user" ? (
                       <div className="ai-message-bubble ai-message-bubble--user">{msg.text}</div>
                     ) : (
-                      <div className="ai-message-bubble ai-message-bubble--assistant">
-                        {msg.intent && <span className="ai-intent-tag">{msg.intent}</span>}
-                        <p className="ai-message-text">{msg.text}</p>
+                        <div className="ai-message-bubble ai-message-bubble--assistant">
+                          {msg.intent && <span className="ai-intent-tag">{msg.intent}</span>}
+                          <p className="ai-message-text">{msg.text}</p>
 
                         {msg.results && msg.results.length > 0 && (
                           <div className="results-grid-container ai-results-grid">
@@ -878,72 +909,13 @@ export default function App() {
         </main>
 
         {/* RIGHT COLUMN */}
-        <aside className="right-relationship-sidebar" style={{ background: "rgba(255,255,255,0.01)", borderLeft: "1px solid var(--border-dim)", padding: "20px", display: "flex", flexDirection: "column", gap: "20px", overflowY: "auto" }}>
-          <h3 className="filter-headline" style={{ margin: 0, borderBottom: "1px solid var(--border-dim)", paddingBottom: "10px" }}>Relationship Sandbox</h3>
-          
-          {searchedBaseObject ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
-              
-              {/* OBJECT A */}
-              <div style={{ background: "rgba(59, 130, 246, 0.05)", border: "1px solid rgba(59, 130, 246, 0.2)", borderRadius: "8px", padding: "12px" }}>
-                <span style={{ fontSize: "0.7rem", color: "var(--accent-blue)", fontWeight: 700, textTransform: "uppercase", display: "block", marginBottom: "6px" }}>[A] Root Artifact</span>
-                {searchedBaseObject.image_url && (
-                  <img src={searchedBaseObject.image_url} alt="" style={{ width: "100%", height: "120px", objectFit: "cover", borderRadius: "4px", marginBottom: "8px" }} />
-                )}
-                <strong style={{ fontSize: "0.85rem", display: "block", color: "white", marginBottom: "4px" }}>{searchedBaseObject.title}</strong>
-                <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>ID: {searchedBaseObject.object_id}</span>
-              </div>
-
-              {/* ACTION BUTTON */}
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "8px" }}>
-                <span style={{ fontSize: "1.5rem", color: "var(--text-muted)" }}>⬇️</span>
-                {selected && searchedBaseObject.object_id !== selected.object_id ? (
-                  <button 
-                    type="button" 
-                    className="primary-action-trigger" 
-                    style={{ 
-                      width: "100%", 
-                      padding: "10px", 
-                      fontSize: "0.8rem", 
-                      fontWeight: 700, 
-                      background: "var(--accent-blue)", 
-                      border: "none", 
-                      borderRadius: "6px", 
-                      color: "white", 
-                      cursor: "pointer",
-                      boxShadow: "0 4px 12px rgba(37, 99, 235, 0.2)"
-                    }}
-                    onClick={() => handleExplainRelationship(searchedBaseObject, selected)}
-                  >
-                    ✨ Explain Overlap with AI
-                  </button>
-                ) : (
-                  <div style={{ textAlign: "center", padding: "6px 12px", border: "1px dashed var(--border-dim)", borderRadius: "6px", width: "100%" }}>
-                    <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Select related artifact below</span>
-                  </div>
-                )}
-              </div>
-
-              {/* OBJECT B */}
-              {selected && (
-                <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid var(--border-dim)", borderRadius: "8px", padding: "12px" }}>
-                  <span style={{ fontSize: "0.7rem", color: "var(--text-secondary)", fontWeight: 700, textTransform: "uppercase", display: "block", marginBottom: "6px" }}>[B] Compared Artifact</span>
-                  {selected.image_url && (
-                    <img src={selected.image_url} alt="" style={{ width: "100%", height: "120px", objectFit: "cover", borderRadius: "4px", marginBottom: "8px" }} />
-                  )}
-                  <strong style={{ fontSize: "0.85rem", display: "block", color: "white", marginBottom: "4px" }}>{selected.title}</strong>
-                  <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>ID: {selected.object_id}</span>
-                </div>
-              )}
-
-            </div>
-          ) : (
-            <div style={{ textAlign: "center", padding: "40px 10px", color: "var(--text-muted)", border: "1.5px dashed var(--border-dim)", borderRadius: "8px" }}>
-              <span style={{ fontSize: "1.5rem", display: "block", marginBottom: "10px" }}>🧭</span>
-              <p style={{ fontSize: "0.8rem", margin: 0 }}>Αναζητήστε και επιλέξτε ένα έκθεμα για να ξεκινήσει η διαδικασία σύνδεσης.</p>
-            </div>
-          )}
-        </aside>
+        <RightPanel
+          stats={STATS_DATA}
+          searchedBaseObject={searchedBaseObject}
+          selected={selected}
+          onExplain={handleExplainRelationship}
+          onOpenSandbox={() => setActiveTab("matrix")}
+        />
 
       </div>
       {error && <p className="page__error" style={{ textAlign: "center", padding: "1rem", color: "#ef4444" }}>{error}</p>}

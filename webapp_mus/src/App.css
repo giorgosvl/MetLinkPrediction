@@ -1118,6 +1118,9 @@ body {
   font-size: 0.9rem;
 }
 
+.purple-text { color: #c084fc; }
+.blue-text { color: #60a5fa; }
+
 .matrix-input-label {
   font-size: 0.8rem;
   font-weight: 600;

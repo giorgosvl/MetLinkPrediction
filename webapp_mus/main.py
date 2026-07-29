@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import sqlite3
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import pandas as pd
 import requests
@@ -69,6 +71,15 @@ class AISearchResponse(BaseModel):
 
 DF_META: pd.DataFrame | None = None
 
+# In-process cache: object_id -> image_url. get_object_info() hits the real
+# MET public API for the image URL, which is a real network round-trip
+# (sometimes 1-2s). Without this cache, every search/related-objects
+# request re-fetches the SAME object's image on every call, which is the
+# dominant source of latency in this backend. Lock because uvicorn can
+# serve requests from multiple worker threads.
+_IMAGE_URL_CACHE: dict[int, str] = {}
+_IMAGE_URL_CACHE_LOCK = threading.Lock()
+
 @app.on_event("startup")
 def load_data() -> None:
     global DF_META
@@ -110,16 +121,23 @@ def get_object_info(object_id: int) -> dict:
         elif pd.notna(begin):
             year_str = str(int(begin))
 
-    # 2. 🌐 Live κλήση στο API του MET για να βρούμε την ΠΡΑΓΜΑΤΙΚΗ εικόνα του συγκεκριμένου ID
-    try:
-        met_api_url = f"https://collectionapi.metmuseum.org/public/collection/v1/objects/{object_id}"
-        res = requests.get(met_api_url, timeout=2.0)
-        if res.status_code == 200:
-            data = res.json()
-            # Παίρνουμε τη μικρή εικόνα (primaryImageSmall) για να φορτώνει σφαίρα το UI
-            image_url = data.get("primaryImageSmall", data.get("primaryImage", ""))
-    except Exception:
-        pass 
+    # 2. 🌐 Live κλήση στο API του MET -- μόνο αν δεν την έχουμε ήδη κάνει.
+    with _IMAGE_URL_CACHE_LOCK:
+        cached_url = _IMAGE_URL_CACHE.get(object_id)
+    if cached_url is not None:
+        image_url = cached_url
+    else:
+        try:
+            met_api_url = f"https://collectionapi.metmuseum.org/public/collection/v1/objects/{object_id}"
+            res = requests.get(met_api_url, timeout=2.0)
+            if res.status_code == 200:
+                data = res.json()
+                # Παίρνουμε τη μικρή εικόνα (primaryImageSmall) για να φορτώνει σφαίρα το UI
+                image_url = data.get("primaryImageSmall", data.get("primaryImage", ""))
+        except Exception:
+            pass
+        with _IMAGE_URL_CACHE_LOCK:
+            _IMAGE_URL_CACHE[object_id] = image_url  # cache even "" so a dead ID isn't retried every time
 
     # Αν το μουσείο δεν έχει καθόλου φωτογραφία για το έκθεμα, βάζουμε ένα default placeholder
     if not image_url:
@@ -178,7 +196,7 @@ def generate_ollama_explanation_live(query_info: dict, cand_info: dict, features
                     "num_predict": 400
                 }
             },
-            timeout=200.0
+            timeout=45.0  # generous, but 200s meant a single slow/stuck call could hang the request for minutes
         )
         if response.status_code == 200:
             result_json = response.json()
@@ -189,6 +207,44 @@ def generate_ollama_explanation_live(query_info: dict, cand_info: dict, features
     except Exception as e:
         print(f"Failed to communicate with Ollama: {e}")
         return "📝 *Ollama is not running locally. Run 'ollama serve' and try again.*"
+
+
+def template_explanation(query_info: dict, cand_info: dict, features: dict, probability: float) -> str:
+    """Instant, no-LLM-call fallback explanation, used when a pair doesn't
+    have a precomputed explanation cached yet. Mirrors the template used in
+    the original dashboard_core.py: the bulk /api/related list should never
+    block on a live Ollama round-trip (each one can take seconds, and
+    generate_ollama_explanation_live() has a 200s timeout) -- a real LLM
+    explanation is still available on demand via /api/explain-relationship
+    when the user explicitly asks for one pair."""
+    reasons = []
+    if features.get("shared_culture"):
+        culture = query_info.get("culture") or cand_info.get("culture")
+        reasons.append(f"both are attributed to {culture}" if culture else "both share the same culture")
+    if features.get("shared_department"):
+        dept = query_info.get("department")
+        reasons.append(f"both belong to the {dept} department" if dept else "both belong to the same department")
+    cosine = features.get("cosine_similarity", 0.0)
+    reasons.append(f"their descriptions have a semantic similarity of {cosine:.2f}")
+    return (
+        f"Flagged as {probability:.0%} likely related to \"{cand_info.get('title')}\", "
+        f"because {'; '.join(reasons)}. (quick summary — click below for a full AI explanation)"
+    )
+
+
+def get_objects_info_bulk(object_ids: list[int]) -> list[dict]:
+    """Same output as calling get_object_info() once per id, but concurrent.
+
+    This is the main fix for slow search/related-objects responses: fetching
+    N objects' MET images sequentially took N round-trips in a row (each up
+    to ~2s worst case). A small thread pool fetches them all at once instead
+    -- combined with the _IMAGE_URL_CACHE above, only genuinely new object
+    ids ever pay the network cost, and even those pay it in parallel.
+    """
+    if not object_ids:
+        return []
+    with ThreadPoolExecutor(max_workers=min(10, len(object_ids))) as executor:
+        return list(executor.map(get_object_info, object_ids))
 
 
 def save_explanation_to_db(query_id: int, candidate_id: int, explanation: str):
@@ -325,7 +381,17 @@ def filter_objects_by_intent(intent: dict, candidate_ids: list[int] | None) -> l
         culture_mask = contains(culture_col, cult) | contains(culture_col, cult_base) | contains("Department", cult)
         if "Classification" in df.columns:
             culture_mask |= contains("Classification", cult)
-            
+        if "Country" in df.columns:
+            culture_mask |= contains("Country", cult) | contains("Country", cult_base)
+        # Fallback: the structured fields above are frequently missing
+        # (see 01_preprocessing.py -- Culture/Country/Region are sparse for
+        # a large share of rows). Also match Title/Object Name directly so
+        # a query like "Italy" still finds objects whose only mention of
+        # Italy is in the free-text title, instead of returning zero
+        # results just because the structured metadata wasn't populated.
+        culture_mask |= contains("Title", cult) | contains("Title", cult_base)
+        culture_mask |= contains("Object Name", cult) | contains("Object Name", cult_base)
+
         mask &= culture_mask
 
     # 2. 📅 ΑΠΟΛΥΤΑ ΑΥΣΤΗΡΟ ΦΙΛΤΡΟ ΓΙΑ ΗΜΕΡΟΜΗΝΙΕΣ (1800-1900 κλπ)
@@ -548,16 +614,60 @@ def search_objects(q: str = "", limit: int = 20):
         
         sub_df = DF_META[mask_title | mask_name].head(limit)
     
-    results = []
-    for _, row in sub_df.iterrows():
-        # Εξασφαλίζουμε ότι διαβάζουμε σωστά το 'Object ID' από το CSV
-        obj_id = row.get("Object ID")
-        if pd.isna(obj_id):
-            continue
-            
-        results.append(get_object_info(int(obj_id)))
-        
-    return results
+    valid_ids = [int(obj_id) for obj_id in sub_df["Object ID"] if pd.notna(obj_id)]
+    return get_objects_info_bulk(valid_ids)
+
+
+@app.get("/api/geo-distribution")
+def geo_distribution():
+    """Count of catalog objects per Country, for the Map tab.
+
+    Only uses the already-existing 'Country' column from
+    met_with_extracted_info.csv -- no new data source needed. Rows with a
+    missing/blank Country (placeholder values like 'Unknown' were already
+    normalized to NaN back in 01_preprocessing.py) are simply excluded from
+    the per-country counts, but are still reflected in total_objects below
+    so the frontend can show real coverage (e.g. "10,412 of 50,000 objects
+    have a known country") instead of silently under-representing the map.
+    """
+    global DF_META
+    if DF_META is None:
+        print("⚠️ DF_META is not loaded yet!")
+        return {"total_objects": 0, "objects_with_country": 0, "countries": []}
+    if "Country" not in DF_META.columns:
+        return {"total_objects": len(DF_META), "objects_with_country": 0, "countries": []}
+
+    countries = DF_META["Country"].dropna().astype(str).str.strip()
+    countries = countries[countries.str.len() > 0]
+    counts = countries.value_counts()
+
+    return {
+        "total_objects": int(len(DF_META)),
+        "objects_with_country": int(len(countries)),
+        "countries": [{"country": country, "count": int(n)} for country, n in counts.items()],
+    }
+
+
+@app.get("/api/objects-by-country")
+def objects_by_country(country: str, limit: int = 24):
+    """Real museum objects whose Country matches exactly (case-insensitive).
+
+    Powers the click-through from a Map marker/list row into the Explorer
+    results grid -- same get_object_info() shape as /api/search, so the
+    existing frontend results grid renders it with no changes.
+    """
+    global DF_META
+    if DF_META is None:
+        print("⚠️ DF_META is not loaded yet!")
+        return []
+    if "Country" not in DF_META.columns or not country.strip():
+        return []
+
+    mask = DF_META["Country"].astype(str).str.strip().str.lower() == country.strip().lower()
+    sub_df = DF_META[mask].head(limit)
+
+    valid_ids = [int(row.get("Object ID")) for _, row in sub_df.iterrows() if pd.notna(row.get("Object ID"))]
+    return get_objects_info_bulk(valid_ids)
 
 
 @app.get("/api/object/{object_id}", response_model=ObjectSummary)
@@ -604,10 +714,12 @@ def get_related(object_id: int, k: int = 8, explain: bool = True):
             )
             db_explanations = {row["candidate_id"]: row["explanation"] for row in cursor.fetchall()}
 
+        candidate_infos = dict(zip(candidate_ids, get_objects_info_bulk(candidate_ids)))
+
         results = []
         for row in rows:
             cid = row["candidate_id"]
-            cand_info = get_object_info(cid)
+            cand_info = candidate_infos[cid]
             
             features = {}
             if feat_col and row[feat_col]:
@@ -633,10 +745,14 @@ def get_related(object_id: int, k: int = 8, explain: bool = True):
                 if cid in db_explanations:
                     explanation = db_explanations[cid]
                 else:
-                    print(f"🤖 Explanation missing in SQLite for pair ({object_id} -> {cid}). Calling Ollama live...")
-                    explanation = generate_ollama_explanation_live(query_info, cand_info, features, probability)
-                    if "Unable to generate" not in explanation and "Ollama is not running" not in explanation:
-                        save_explanation_to_db(object_id, cid, explanation)
+                    # No cached explanation yet: use an instant template
+                    # instead of a live Ollama call here. Doing the live
+                    # call inline (as before) meant this whole endpoint
+                    # blocked -- potentially for minutes -- on however many
+                    # candidates were still uncached, every single time.
+                    # A real AI explanation is one click away via the
+                    # "Explain the relationship" button (/api/explain-relationship).
+                    explanation = template_explanation(query_info, cand_info, features, probability)
 
             results.append(RelatedObject(
                 object=ObjectSummary(**cand_info),
@@ -769,7 +885,7 @@ def ai_search(payload: AISearchRequest):
     try:
         if kind == "filter_previous" and has_previous:
             ids = filter_objects_by_intent(intent, candidate_ids=previous_ids)
-            results = [get_object_info(oid) for oid in ids]
+            results = get_objects_info_bulk(ids)
             summary = generate_ai_summary_live(payload.query, results)
             return AISearchResponse(intent=intent, summary=summary, results=[ObjectSummary(**r) for r in results])
 
@@ -810,7 +926,7 @@ def ai_search(payload: AISearchRequest):
         # Default: fresh "search" intent (also the fallback for
         # filter_previous/explain_single/compare when there's no history yet).
         ids = filter_objects_by_intent(intent, candidate_ids=None)
-        results = [get_object_info(oid) for oid in ids]
+        results = get_objects_info_bulk(ids)
         summary = generate_ai_summary_live(payload.query, results)
         return AISearchResponse(intent=intent, summary=summary, results=[ObjectSummary(**r) for r in results])
 
