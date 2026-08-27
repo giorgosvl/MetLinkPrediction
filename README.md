@@ -4,6 +4,12 @@ MetLinkPrediction is an end-to-end cultural heritage link prediction project bui
 
 The main goal is to suggest potentially related museum objects even when the relationship is not explicitly stored in the original metadata. The system uses textual similarity, structured metadata, graph topology, temporal uncertainty, and explainable AI outputs to support object discovery.
 
+## Application Screenshot
+
+![MetLinkPrediction web application dashboard](docs/webapp-screenshot.png)
+
+The screenshot above shows the React web application for exploring the MET knowledge graph. The interface includes catalog search, AI search, graph exploration, relationship statistics, featured artifacts, and a relationship sandbox for inspecting object connections.
+
 ## Project Overview
 
 The pipeline starts from the raw `MetObjects.txt` dataset and produces a complete set of artifacts for training and serving a link prediction model:
@@ -24,27 +30,28 @@ The pipeline starts from the raw `MetObjects.txt` dataset and produces a complet
 
 ```text
 .
-├── 01_preprocessing.py
-├── 02_ollama_extraction.py
-├── 03_sample_dataset.py
-├── 04_build_embeddings.py
-├── 05_build_graph.py
-├── 06_link_prediction.py
-├── 07_fuzzy_temporal.py
-├── 09_dashboard_app.py
-├── 10_calibration_check.py
-├── 11_check_separability.py
-├── 12_precompute_dashboard_cache.py
-├── dashboard_cache.py
-├── dashboard_core.py
-├── graph_features.py
-├── fast_assemble_cache.py
-├── precompute_explanations.py
-├── graph/
-├── embeddings/
-├── link_prediction/
-├── fuzzy/
-└── webapp_mus/
+|-- 01_preprocessing.py
+|-- 02_ollama_extraction.py
+|-- 03_sample_dataset.py
+|-- 04_build_embeddings.py
+|-- 05_build_graph.py
+|-- 06_link_prediction.py
+|-- 07_fuzzy_temporal.py
+|-- 09_dashboard_app.py
+|-- 10_calibration_check.py
+|-- 11_check_separability.py
+|-- 12_precompute_dashboard_cache.py
+|-- dashboard_cache.py
+|-- dashboard_core.py
+|-- graph_features.py
+|-- fast_assemble_cache.py
+|-- precompute_explanations.py
+|-- docs/
+|-- graph/
+|-- embeddings/
+|-- link_prediction/
+|-- fuzzy/
+`-- webapp_mus/
 ```
 
 ## Pipeline
@@ -388,32 +395,42 @@ Warm the dashboard cache:
 python 12_precompute_dashboard_cache.py
 ```
 
-## Running the Dashboard
+## Running the Web Application
 
-### Streamlit
+The React/FastAPI application is located in `webapp_mus/`. Run the backend and frontend in two separate terminals.
 
-```bash
-streamlit run 09_dashboard_app.py
-```
-
-### FastAPI backend
+### Terminal 1: FastAPI backend
 
 ```bash
 cd webapp_mus
-uvicorn main:app --reload --port 4345
+python -m uvicorn main:app --reload --port 4345
 ```
 
-### React frontend
+The backend exposes the API at:
+
+```text
+http://localhost:4345/api
+```
+
+### Terminal 2: React frontend
 
 ```bash
 cd webapp_mus
 npm run dev
 ```
 
-The frontend expects the API at:
+After Vite starts, open the local frontend URL shown in the terminal, usually:
 
 ```text
-http://localhost:4345/api
+http://localhost:5173/
+```
+
+The frontend expects the FastAPI backend to be running on port `4345`.
+
+## Running the Streamlit Dashboard
+
+```bash
+streamlit run 09_dashboard_app.py
 ```
 
 ## Large Files and Generated Artifacts
